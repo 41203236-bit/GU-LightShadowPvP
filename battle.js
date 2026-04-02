@@ -1,5 +1,5 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js';
-import { getDatabase, ref, onValue, update } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-database.js';
+import { getDatabase, ref, onValue, update, set } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-database.js';
 import { firebaseConfig } from './firebase-config.js';
 
 const app = initializeApp(firebaseConfig);
@@ -30,10 +30,14 @@ const resultCard = document.getElementById('resultCard');
 const resultTitle = document.getElementById('resultTitle');
 const resultSub = document.getElementById('resultSub');
 const resultRemain = document.getElementById('resultRemain');
-document.getElementById('btnRematch').addEventListener('click', ()=>sendRematch());
-document.getElementById('btnBackMenu').addEventListener('click', ()=>backMenu());
+const btnRematch = document.getElementById('btnRematch');
+const btnBackMenu = document.getElementById('btnBackMenu');
+btnRematch.addEventListener('click', ()=>sendRematch());
+btnBackMenu.addEventListener('click', ()=>backMenu());
 
 let roomCache = null, state = null, turnTimerInterval = null, endTimerInterval = null;
+let creatingRematch = false;
+let redirecting = false;
 
 function clone(o){ return JSON.parse(JSON.stringify(o)); }
 function basePlayer(){ return { hp:100, sp:0, skillUsed:0, stunned:0, defending:false }; }
@@ -57,10 +61,10 @@ function normalizeState(raw, host='O'){
 function isGameOver(s){ return (s?.data?.O?.hp ?? 100) <= 0 || (s?.data?.X?.hp ?? 100) <= 0; }
 function displayMark(v){ return v==='O'?'◯':v==='X'?'✕':''; }
 function checkWin(grid){ const lines=[[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]]; return lines.find(l => grid[l[0]] && grid[l[0]]===grid[l[1]] && grid[l[1]]===grid[l[2]]); }
-function triggerShake(){ const el=document.getElementById('main-container'); el.classList.add('shake-effect'); setTimeout(()=>el.classList.remove('shake-effect'),300); }
+function triggerShake(){ const el=document.getElementById('main-container'); if(!el) return; el.classList.add('shake-effect'); setTimeout(()=>el.classList.remove('shake-effect'),300); }
 function showFloatText(id, txt, col){ const box=document.getElementById(id); if(!box) return; const el=document.createElement('div'); el.className='float-text'; el.innerText=txt; el.style.color=col; el.style.left='0'; box.appendChild(el); setTimeout(()=>el.remove(),800); }
 function drawWinLine(combo){
-  const canvas = document.getElementById('win-line-canvas'); if(!combo) { canvas.innerHTML=''; return; }
+  const canvas = document.getElementById('win-line-canvas'); if(!canvas || !combo) { if(canvas) canvas.innerHTML=''; return; }
   const start = document.getElementById('c-'+combo[0]).getBoundingClientRect();
   const end = document.getElementById('c-'+combo[2]).getBoundingClientRect();
   const wrap = document.querySelector('.board-wrapper').getBoundingClientRect();
@@ -70,15 +74,18 @@ function drawWinLine(combo){
 }
 function applyTimerAlert(remain){
   const el = document.getElementById('timer-container');
-  if(remain <= 10 && remain >= 0){ el.classList.add('timer-warn'); if(remain>0) playSound('tick'); }
+  if(!el) return;
+  if(remain <= 10 && remain >= 0){ el.classList.add('timer-warn'); }
   else { el.classList.remove('timer-warn'); stopSound('tick'); }
 }
 function updateTimerDisplay(){
   if(!state) return;
   const phase = roomCache?.phase || 'playing';
-  if(phase !== 'playing'){ document.getElementById('timer-container').textContent='--'; document.getElementById('timer-container').classList.remove('timer-warn'); return; }
+  const el = document.getElementById('timer-container');
+  if(!el) return;
+  if(phase !== 'playing'){ el.textContent='--'; el.classList.remove('timer-warn'); return; }
   const remain = Math.max(0, Math.ceil(((state.turnEndsAt||nextTurnEndsAt()) - Date.now())/1000));
-  document.getElementById('timer-container').textContent = String(remain);
+  el.textContent = String(remain);
   applyTimerAlert(remain);
 }
 function startTurnTimer(){
@@ -86,7 +93,7 @@ function startTurnTimer(){
   turnTimerInterval = setInterval(async ()=>{
     if(!state || (roomCache?.phase||'playing') !== 'playing') return;
     const remain = Math.max(0, Math.ceil(((state.turnEndsAt||nextTurnEndsAt()) - Date.now())/1000));
-    document.getElementById('timer-container').textContent = String(remain);
+    const el = document.getElementById('timer-container'); if(el) el.textContent = String(remain);
     applyTimerAlert(remain);
     if(remain <= 0 && myRole === roomCache?.host && !isGameOver(state)){
       const s = clone(state); swapTurnLocal(s); state=s; render(); try{ await pushState(s); }catch{}
@@ -94,17 +101,18 @@ function startTurnTimer(){
   },250);
 }
 function stopAllTimers(){ clearInterval(turnTimerInterval); clearInterval(endTimerInterval); stopSound('tick'); }
-function setOverlay(msg){ const overlay=document.getElementById('overlayWait'); document.getElementById('overlayMsg').textContent=msg; overlay.style.display='flex'; }
-function hideOverlay(){ document.getElementById('overlayWait').style.display='none'; }
+function setOverlay(msg){ const overlay=document.getElementById('overlayWait'); const msgEl=document.getElementById('overlayMsg'); if(msgEl) msgEl.textContent=msg; if(overlay) overlay.style.display='flex'; }
+function hideOverlay(){ const overlay=document.getElementById('overlayWait'); if(overlay) overlay.style.display='none'; }
 function setBoardLock(canAct,msg){
   const bw=document.getElementById('board-wrap'), sw=document.getElementById('skill-footer-wrap');
   const bm=document.getElementById('board-lock-mask'), sm=document.getElementById('skill-lock-mask');
-  if(canAct){ bw.classList.remove('interaction-locked'); sw.classList.remove('interaction-locked'); bm.textContent=''; sm.textContent=''; }
-  else { bw.classList.add('interaction-locked'); sw.classList.add('interaction-locked'); bm.textContent=msg||'等待對手回合'; sm.textContent=msg||'不是你的操作階段'; }
+  if(canAct){ bw?.classList.remove('interaction-locked'); sw?.classList.remove('interaction-locked'); if(bm) bm.textContent=''; if(sm) sm.textContent=''; }
+  else { bw?.classList.add('interaction-locked'); sw?.classList.add('interaction-locked'); if(bm) bm.textContent=msg||'等待對手回合'; if(sm) sm.textContent=msg||'不是你的操作階段'; }
 }
 function applyPerspective(){
   const panelO=document.getElementById('panel-O'), panelX=document.getElementById('panel-X');
   const badgeO=document.getElementById('badge-O'), badgeX=document.getElementById('badge-X');
+  if(!panelO || !panelX || !badgeO || !badgeX) return;
   panelO.className='side-panel'; panelX.className='side-panel'; badgeO.className='identity-badge'; badgeX.className='identity-badge';
   if(myRole==='O'){ panelO.classList.add('my-side'); panelX.classList.add('enemy-side'); badgeO.classList.add('me'); badgeX.classList.add('enemy'); badgeO.textContent='你 · 光 / O'; badgeX.textContent='對手 · 影 / X'; }
   else { panelX.classList.add('my-side'); panelO.classList.add('enemy-side'); badgeX.classList.add('me'); badgeO.classList.add('enemy'); badgeX.textContent='你 · 影 / X'; badgeO.textContent='對手 · 光 / O'; }
@@ -114,46 +122,95 @@ function applyPerspective(){
 function renderSkills(){
   const myData = state?.data?.[myRole] || basePlayer();
   let dotsHTML=''; for(let i=0;i<3;i++) dotsHTML += `<div class="u-dot ${i < (3 - (myData.skillUsed||0)) ? 'fill' : ''}"></div>`;
-  document.getElementById('usage-dots-container').innerHTML = dotsHTML;
+  const dotsContainer = document.getElementById('usage-dots-container'); if(dotsContainer) dotsContainer.innerHTML = dotsHTML;
   const skills=[{t:'atk',c:1},{t:'def',c:1},{t:'hel',c:2},{t:'stn',c:3}];
   const canAct = (roomCache?.phase||'playing')==='playing' && state?.turn===myRole && !isGameOver(state);
   const sealed = !!myData.stunned;
-  document.getElementById('skill-list-container').innerHTML = skills.map(s=>{
+  const cont = document.getElementById('skill-list-container');
+  if(!cont) return;
+  cont.innerHTML = skills.map(s=>{
     const can = canAct && !sealed && myData.sp >= s.c && myData.skillUsed < 3;
     return `<button class="s-btn btn-${s.t} ${can?'active':''} ${sealed?'sealed':''}" data-skill="${s.t}"><div class="cost-tag">SP ${s.c}</div></button>`;
   }).join('');
   document.querySelectorAll('[data-skill]').forEach(btn=>btn.addEventListener('click',()=>useSkill(btn.dataset.skill)));
 }
-function showResultOverlay(){
+function showResultOverlay(kind='ended'){
   const winner = roomCache?.winner;
-  const isWin = winner === myRole;
-  resultCard.className = 'result-card ' + (isWin ? 'win':'lose');
-  resultTitle.textContent = isWin ? '勝利' : '失敗';
-  resultSub.textContent = isWin ? '你成功擊敗對手' : '這一局很可惜';
-  const rematch = roomCache?.rematch || {O:false,X:false,deadline:Date.now()+10000};
-  const remain = Math.max(0, Math.ceil(((rematch.deadline||Date.now()) - Date.now())/1000));
-  resultRemain.textContent = `重玩等待：${remain} 秒`;
-  document.getElementById('btnRematch').textContent = rematch[myRole] ? '已確認重玩' : '重新遊玩';
+  if(kind === 'closed'){
+    resultCard.className = 'result-card lose';
+    resultTitle.textContent = '對手已退出';
+    resultSub.textContent = '本局已結束，請返回菜單';
+    resultRemain.textContent = '';
+    btnRematch.style.display = 'none';
+    btnBackMenu.textContent = '返回菜單';
+  } else {
+    const isWin = winner === myRole;
+    resultCard.className = 'result-card ' + (isWin ? 'win':'lose');
+    resultTitle.textContent = isWin ? '勝利' : '失敗';
+    resultSub.textContent = isWin ? '你成功擊敗對手' : '這一局很可惜';
+    const rematch = roomCache?.rematch || {O:false,X:false,deadline:Date.now()+10000};
+    const remain = Math.max(0, Math.ceil(((rematch.deadline||Date.now()) - Date.now())/1000));
+    resultRemain.textContent = `重玩等待：${remain} 秒`;
+    btnRematch.style.display = '';
+    btnRematch.textContent = rematch[myRole] ? '已確認重玩' : '重新遊玩';
+    btnBackMenu.textContent = '返回菜單';
+  }
   resultOverlay.classList.add('show');
 }
-function hideResultOverlay(){ resultOverlay.classList.remove('show'); }
+function hideResultOverlay(){ resultOverlay.classList.remove('show'); btnRematch.style.display=''; }
+function codeGen(){ return Math.random().toString(36).slice(2,8).toUpperCase(); }
+async function createNewRoomFromRematch(){
+  if(creatingRematch) return;
+  creatingRematch = true;
+  try {
+    const newCode = codeGen();
+    const host = roomCache?.host || 'O';
+    const freshRoom = {
+      phase: 'playing',
+      host,
+      winner: null,
+      rematch: null,
+      redirectRoom: null,
+      closedBy: null,
+      players: { O:{ joined:true, ready:false }, X:{ joined:true, ready:false } },
+      state: defaultState(host)
+    };
+    await set(ref(db, `rooms/${newCode}`), freshRoom);
+    await update(roomRef, { phase:'redirect', redirectRoom:newCode, winner:null });
+  } finally {
+    creatingRematch = false;
+  }
+}
 function startEndCountdown(){
   clearInterval(endTimerInterval);
   endTimerInterval = setInterval(async ()=>{
-    if((roomCache?.phase||'') !== 'ended') return;
+    const phase = roomCache?.phase || '';
+    if(phase === 'closed'){
+      showResultOverlay('closed');
+      return;
+    }
+    if(phase === 'redirect'){
+      const newCode = roomCache?.redirectRoom;
+      if(newCode && !redirecting){
+        redirecting = true;
+        location.href = `./battle.html?room=${encodeURIComponent(newCode)}&role=${encodeURIComponent(myRole)}`;
+      }
+      return;
+    }
+    if(phase !== 'ended') return;
     showResultOverlay();
     const rematch = roomCache?.rematch || {};
     const remain = Math.max(0, Math.ceil(((rematch.deadline||Date.now()) - Date.now())/1000));
     resultRemain.textContent = `重玩等待：${remain} 秒`;
+    if(myRole === roomCache?.host && rematch.O && rematch.X && !roomCache?.redirectRoom){
+      await createNewRoomFromRematch();
+      return;
+    }
     if(remain <= 0){
       if(myRole === roomCache?.host){
-        if(rematch.O && rematch.X){
-          await update(roomRef, { phase:'countdown', startAt: Date.now()+3000, winner:null, rematch:null, state: defaultState(roomCache?.host||'O') });
-        } else {
-          await update(roomRef, { phase:'lobby', winner:null, rematch:null, startAt:null, state:null, 'players/O/ready': false, 'players/X/ready': false });
-        }
+        await update(roomRef, { phase:'closed', closedBy: rematch.O||rematch.X ? 'timeout' : 'system' });
       }
-      if(!(rematch.O && rematch.X)) location.href = './lobby.html';
+      location.href = './lobby.html';
     }
   }, 250);
 }
@@ -163,24 +220,26 @@ function render(){
   if(phase === 'playing'){ hideOverlay(); hideResultOverlay(); }
   else if(phase === 'countdown'){ setOverlay('倒數中…'); hideResultOverlay(); }
   else if(phase === 'ended'){ hideOverlay(); showResultOverlay(); startEndCountdown(); }
+  else if(phase === 'closed'){ hideOverlay(); showResultOverlay('closed'); startEndCountdown(); }
+  else if(phase === 'redirect'){ setOverlay('正在建立新房間並進入戰鬥…'); hideResultOverlay(); startEndCountdown(); }
   else { setOverlay('等待戰鬥狀態…'); hideResultOverlay(); }
-  document.getElementById('turnText').textContent = phase==='playing' ? (state.turn===myRole ? '現在輪到你操作' : `現在輪到${state.turn==='O'?'光 / O':'影 / X'}`) : phase==='ended' ? '本局結束' : '等待戰鬥開始';
+  document.getElementById('turnText').textContent = phase==='playing' ? (state.turn===myRole ? '現在輪到你操作' : `現在輪到${state.turn==='O'?'光 / O':'影 / X'}`) : phase==='ended' ? '本局結束' : phase==='closed' ? '對手已退出' : '等待戰鬥開始';
   updateTimerDisplay();
   ['O','X'].forEach(p=>{
     const hp = Math.max(0, Math.min(100, Number(state.data?.[p]?.hp ?? 100)));
     const fill=document.getElementById(`hp-fill-${p}`), ghost=document.getElementById(`hp-ghost-${p}`), val=document.getElementById(`hp-val-${p}`), avatar=document.getElementById(`avatar-${p}`);
-    fill.style.clipPath = `inset(${100-hp}% 0 0 0)`; ghost.style.clipPath = `inset(${100-hp}% 0 0 0)`; val.innerText=Math.floor(hp)+'%'; val.style.top=`calc(${100-hp}% + 10px)`;
-    if(state.data[p].defending) fill.classList.add('defending-bar'); else fill.classList.remove('defending-bar');
-    if(state.data[p].stunned) avatar.classList.add('stunned-avatar'); else avatar.classList.remove('stunned-avatar');
-    let spHTML=''; const sp=Math.max(0,Math.min(5,Number(state.data?.[p]?.sp ?? 0))); for(let i=0;i<5;i++) spHTML += `<div class="sp-dot ${i<sp?'sp-on':'sp-off'}"></div>`; document.getElementById(`sp-display-${p}`).innerHTML=spHTML;
+    if(fill) fill.style.clipPath = `inset(${100-hp}% 0 0 0)`; if(ghost) ghost.style.clipPath = `inset(${100-hp}% 0 0 0)`; if(val){ val.innerText=Math.floor(hp)+'%'; val.style.top=`calc(${100-hp}% + 10px)`; }
+    if(fill){ if(state.data[p].defending) fill.classList.add('defending-bar'); else fill.classList.remove('defending-bar'); }
+    if(avatar){ if(state.data[p].stunned) avatar.classList.add('stunned-avatar'); else avatar.classList.remove('stunned-avatar'); }
+    let spHTML=''; const sp=Math.max(0,Math.min(5,Number(state.data?.[p]?.sp ?? 0))); for(let i=0;i<5;i++) spHTML += `<div class="sp-dot ${i<sp?'sp-on':'sp-off'}"></div>`; const spd = document.getElementById(`sp-display-${p}`); if(spd) spd.innerHTML=spHTML;
   });
   for(let i=0;i<9;i++){
-    const el=document.getElementById(`c-${i}`); const v=state.grid?.[i]||''; el.textContent=displayMark(v); el.className='cell '+v;
+    const el=document.getElementById(`c-${i}`); if(!el) continue; const v=state.grid?.[i]||''; el.textContent=displayMark(v); el.className='cell '+v;
     if(v && state.queues?.[v]?.length===3 && state.queues[v][0]===i) el.classList.add('warning-cell');
   }
   renderSkills(); applyPerspective();
   const canAct = phase==='playing' && state.turn===myRole && !isGameOver(state);
-  const msg = phase!=='playing' ? (phase==='ended' ? '本局已結束' : '等待戰鬥開始') : isGameOver(state) ? '戰鬥已結束' : state.turn!==myRole ? '等待對手回合' : '';
+  const msg = phase!=='playing' ? (phase==='ended' ? '本局已結束' : phase==='closed' ? '對手已退出' : phase==='redirect' ? '正在建立新房' : '等待戰鬥開始') : isGameOver(state) ? '戰鬥已結束' : state.turn!==myRole ? '等待對手回合' : '';
   setBoardLock(canAct,msg);
 }
 function swapTurnLocal(s){
@@ -192,11 +251,11 @@ function swapTurnLocal(s){
   s.turnEndsAt = nextTurnEndsAt();
   return s;
 }
-function resetGridLocal(s){ document.getElementById('win-line-canvas').innerHTML=''; s.grid=Array(9).fill(null); s.queues={O:[],X:[]}; return swapTurnLocal(s); }
+function resetGridLocal(s){ const wl = document.getElementById('win-line-canvas'); if(wl) wl.innerHTML=''; s.grid=Array(9).fill(null); s.queues={O:[],X:[]}; return swapTurnLocal(s); }
 async function pushState(newState){ await update(roomRef,{ state:newState }); }
 async function endGame(winner){
   const deadline = Date.now() + 10000;
-  await update(roomRef,{ state, phase:'ended', winner, rematch:{ O:false, X:false, deadline } });
+  await update(roomRef,{ state, phase:'ended', winner, redirectRoom:null, closedBy:null, rematch:{ O:false, X:false, deadline } });
 }
 async function tap(i){
   if(!state || (roomCache?.phase||'playing')!=='playing' || state.turn!==myRole || state.grid[i] || isGameOver(state)) return;
@@ -225,15 +284,27 @@ async function sendRematch(){
   await update(roomRef,{ [`rematch/${myRole}`]: true });
 }
 async function backMenu(){
-  if(myRole === roomCache?.host){
-    await update(roomRef, { phase:'lobby', winner:null, rematch:null, startAt:null, state:null, 'players/O/ready': false, 'players/X/ready': false });
-  }
+  try {
+    await update(roomRef, { phase:'closed', closedBy: myRole });
+  } catch {}
   location.href = './lobby.html';
 }
-onValue(roomRef, snap=>{
-  const room=snap.val(); if(!room){ location.href='./index.html'; return; }
+onValue(roomRef, async snap=>{
+  const room=snap.val();
+  if(!room){ location.href='./index.html'; return; }
   roomCache=room; state=normalizeState(room.state, room.host || 'O');
   if((room.phase||'playing')==='playing') startTurnTimer(); else clearInterval(turnTimerInterval);
+  if(room.phase === 'ended' || room.phase === 'closed' || room.phase === 'redirect') startEndCountdown();
   render();
+  if(room.phase === 'ended' && myRole === room.host && room.rematch?.O && room.rematch?.X && !room.redirectRoom){
+    await createNewRoomFromRematch();
+  }
+  if(room.phase === 'redirect' && room.redirectRoom && !redirecting){
+    redirecting = true;
+    location.href = `./battle.html?room=${encodeURIComponent(room.redirectRoom)}&role=${encodeURIComponent(myRole)}`;
+  }
+  if(room.phase === 'closed' && room.closedBy && room.closedBy !== myRole){
+    showResultOverlay('closed');
+  }
 });
 window.tap = tap; window.useSkill = useSkill;
